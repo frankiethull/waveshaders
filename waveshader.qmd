@@ -1,0 +1,171 @@
+---
+title: "waveshaders"
+author: "frankiethull"
+format: gfm
+---
+
+why does this repo exist? To store some artsy rayshader examples with chaotic julia simulations. i.e. how to dual wield Julia & R to make beautiful graphics.   
+
+## waveshading?
+
+**waveshading** was tagged in a few playful posts on my Twitter/X. This related two systems: one in Julia, one in R.   
+
+Tested both Julia's waterlily.jl and oceananigans.jl computational fluid dynamics engines which allow chaotic fluid simulations. "rayshader" is a 3d plotting toolkit in R. Combining the two langs' libs mainly for funsies, trying out multiple esoteric open-source pkgs, & testing multilingual quarto documents. As an added layer, examples below use Arrow.jl to write the data, and arrow library in R to read in the data.
+ 
+**Marrying the two together (Julia + R) sparked a lot of interest ("let me see your code!") type of requests on X. Not necessarily for scientific reasons, but for artistic renderings of fluids!**    
+
+Below is a simple tutorial on running simulations in Julia and creating visualizations in R. Whether it be terrain-based, fluid flows, cloud physics, or whatever; there are a lot of cool artistic ways to leverage rayshader + various tools from Python or Julia to make some really cool renderings. 
+
+#### julia simulation code 
+let's run some code in julia, then pass the results to R. Below we are running a julia code-chunk. 
+
+Note, you can do any waterlily, oceananigans, or other julia example, but this one is short and requires less domain knowledge. https://docs.makie.org/stable/reference/plots/surface/
+
+This example is borrowed from Makie documentation which seemed like a better start for a tutorial. Instead of going all out on a fluid simulation, we are going to simulate a single matrix. This is the best starting point imo! 
+
+```{julia}
+# pkg setup for julia is pretty easy, example given:
+# import Pkg; Pkg.add("package_name")
+
+using SparseArrays
+using LinearAlgebra
+# using GLMakie
+
+
+# This example was provided by Moritz Schauer (@mschauer).
+
+# Define the precision matrix (inverse covariance matrix)
+# for the Gaussian noise matrix.  It approximately coincides
+# with the Laplacian of the 2d grid or the graph representing
+# the neighborhood relation of pixels in the picture,
+# https://en.wikipedia.org/wiki/Laplacian_matrix
+
+function gridlaplacian(m, n)
+    S = sparse(0.0I, n*m, n*m)
+    linear = LinearIndices((1:m, 1:n))
+    for i in 1:m
+        for j in 1:n
+            for (i2, j2) in ((i + 1, j), (i, j + 1))
+                if i2 <= m && j2 <= n
+                    S[linear[i, j], linear[i2, j2]] -= 1
+                    S[linear[i2, j2], linear[i, j]] -= 1
+                    S[linear[i, j], linear[i, j]] += 1
+                    S[linear[i2, j2], linear[i2, j2]] += 1
+                end
+            end
+        end
+    end
+    return S
+end
+
+# d is used to denote the size of the data
+d = 150
+
+ # Sample centered Gaussian noise with the right correlation by the method
+ # based on the Cholesky decomposition of the precision matrix
+data = 0.1randn(d,d) + reshape(
+        cholesky(gridlaplacian(d,d) + 0.003I) \ randn(d*d),
+        d, d
+)
+
+# makie code is commented out, instead we will pass the data to R for rayshader.
+# surface(data; shading = NoShading, colormap = :deep)
+# surface(data; shading = NoShading, colormap = :deep)
+```
+
+convert the matrix to dataframe and save it off as an arrow file for R
+```{julia}
+using Arrow 
+using DataFrames
+
+laplace_df = DataFrame(data, :auto)
+
+Arrow.write("laplacian.arrow", laplace_df)
+```
+
+#### R visualization code 
+next lets get the data setup in R for rayshader. There are a few ways to do this. First load the df into a data.frame, then create an id for each row-column and stretch it so it's in a long format.
+
+This will give us a lot of flexibility as we are going to use ggplot2 then convert the ggplot2 into a rayshader plot (if you are familiar with ggplot2, this is a shortcut).   
+
+From there, xy binning to approximate the density of the surface (makes a better visual imo). & 2-d hexagon bins work well. 
+
+```{r}
+library(dplyr)
+library(tidyr)
+library(ggplot2)
+library(rayshader)
+
+# julia output
+laplace_df <- arrow::read_ipc_file("laplacian.arrow")
+
+# let's get this xy-matrix into a long df:
+laplace_long_df <- laplace_df |>
+                   mutate(
+                     x_id = row_number()
+                   ) |>
+                    tidyr::pivot_longer(-x_id, names_to = "y_id", values_to = "z") |>
+                    mutate(
+                      y_id = gsub("x", "", y_id),
+                      y_id = as.numeric(y_id)
+                    )
+
+# ggplot hex display:
+gg <- 
+laplace_long_df |>
+    ggplot(aes(x = x_id, y = y_id, z = z)) +
+  stat_summary_hex(fun = function(x) mean(x), bins = 45)  +
+  scale_fill_viridis_c(option = 12) + 
+  theme_void() +
+  theme(legend.position = "none")
+
+gg + labs(subtitle = "hexagonal 2-d heatmap of laplacian matrix")
+```
+
+creating the 3D-ified ggplot with rayshader:
+```{r}
+plot_gg(gg, height=5, width=4.5, 
+        phi   = 25, 
+        zoom  = 0.4, 
+        theta = -140, 
+        background = "salmon")
+
+render_snapshot(filename = "rayshader_v1.png")
+```
+
+display the snapshot:
+```{r}
+magick::image_read("rayshader_v1.png") |> 
+  plot()
+```
+adjusting phi, theta, and zoom:
+```{r}
+plot_gg(gg, height=5, width=4.5, 
+        phi   = 25, 
+        zoom  = 0.5, 
+        theta = 120, 
+        background = "salmon")
+
+render_snapshot(filename = "rayshader_v2.png")
+
+magick::image_read("rayshader_v2.png") |> 
+  plot()
+```
+
+
+from there, you can stitch multiple images together (if you have a delta such as time or some other step function you are iterating over. Like rotating phi or theta in a loop). If there are more than one file, create a video from a list of saved png files like so: 
+   
+fps <- 10      
+av::av_encode_video(file_list, 'output.mp4', framerate = fps)      
+utils::browseURL('output.mp4')       
+
+
+based on feedback will save off more complicated examples in an example subfolder. But think this is the best starting point for running CFD in Julia and shaders in R.   
+     
+*To recreate the original Twitter post, see this example:*      
+*https://clima.github.io/OceananigansDocumentation/stable/literated/convecting_plankton/*                     
+*original post:*      
+*https://x.com/frankiethull/status/1744557482779742514?t=sgeF2vulucLE1h-xD9LJ1A&s=19*      
+      
+Additional notes:     
+my system has both julia and R installed on a windows machine. I have RCall installed on Julia and JuliaCall installed on R. Julia is on my env paths and this was ran using knitr via R, not a Julia Jupyter kernel. 
